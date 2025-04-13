@@ -2,18 +2,18 @@
 
 #include <JuceHeader.h>
 
-class MainComponent  : public juce::AudioAppComponent,
-                       public juce::Button::Listener
+class MainComponent : public juce::AudioAppComponent,
+                     public juce::Button::Listener
 {
 public:
     MainComponent();
     ~MainComponent() override;
 
-    void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
-    void getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferToFill) override;
+    void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override;
+    void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override;
     void releaseResources() override;
 
-    void paint (juce::Graphics&) override;
+    void paint(juce::Graphics&) override;
     void resized() override;
     void buttonClicked(juce::Button*) override;
 
@@ -34,6 +34,7 @@ private:
     bool useDelay = false;
 
     void applyEffects(juce::AudioBuffer<float>& buffer);
+    void drawWaveform(juce::Graphics& g);
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

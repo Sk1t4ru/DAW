@@ -17,8 +17,8 @@ MainComponent::MainComponent()
     distortionButton.addListener(this);
     delayButton.addListener(this);
 
-    setSize(400, 200);
-    setAudioChannels(2, 2); // 2 входа, 2 выхода
+    setSize(600, 400);
+    setAudioChannels(2, 2);
 }
 
 MainComponent::~MainComponent()
@@ -28,20 +28,11 @@ MainComponent::~MainComponent()
 
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
-    DBG("prepareToPlay: sampleRate = " << sampleRate);
-
-    if (sampleRate <= 0)
-    {
-        jassertfalse;
-        return;
-    }
-
-    int maxLength = (int)(sampleRate * 60.0); // максимум 60 сек записи
-    recordedBuffer.setSize(2, maxLength);
+    recordedBuffer.setSize(2, static_cast<int>(sampleRate * 60.0));
     recordedBuffer.clear();
     recordedSamples = 0;
 
-    delayBuffer.setSize(2, (int)sampleRate); // 1 секунда задержки
+    delayBuffer.setSize(2, static_cast<int>(sampleRate));
     delayBuffer.clear();
     delayBufferPos = 0;
 }
@@ -49,8 +40,7 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
     auto* buffer = bufferToFill.buffer;
-
-    // Запись
+    
     if (isRecording)
     {
         int remaining = recordedBuffer.getNumSamples() - recordedSamples;
@@ -61,43 +51,72 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
             for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
             {
                 recordedBuffer.copyFrom(ch, recordedSamples,
-                                        *buffer, ch, bufferToFill.startSample,
-                                        samplesToCopy);
+                                     *buffer, ch, bufferToFill.startSample,
+                                     samplesToCopy);
             }
             recordedSamples += samplesToCopy;
         }
 
         if (samplesToCopy < bufferToFill.numSamples)
         {
-            DBG("Recording buffer full, stopping.");
             isRecording = false;
-            juce::MessageManager::callAsync([this]() {
-                recordButton.setButtonText("Record");
-            });
+            recordButton.setButtonText("Record");
         }
     }
 
-    // Эффекты
     applyEffects(*buffer);
 }
 
 void MainComponent::releaseResources()
 {
-    DBG("releaseResources");
+    // Cleanup if needed
 }
 
 void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colours::darkslategrey);
+    drawWaveform(g);
+}
+
+void MainComponent::drawWaveform(juce::Graphics& g)
+{
+    g.setColour(juce::Colours::lightgrey);
+    auto bounds = getLocalBounds().removeFromBottom(200).reduced(10);
+    g.drawRect(bounds, 1);
+
+    if (recordedSamples > 0)
+    {
+        g.setColour(juce::Colours::cyan);
+        
+        auto* channelData = recordedBuffer.getReadPointer(0);
+        auto scale = bounds.getHeight() / 2.0f;
+        auto center = bounds.getCentreY();
+        auto step = static_cast<float>(recordedSamples) / bounds.getWidth();
+        
+        juce::Path waveformPath;
+        waveformPath.startNewSubPath(bounds.getX(), center);
+        
+        for (int x = bounds.getX(); x < bounds.getRight(); ++x)
+        {
+            auto sampleIndex = juce::jmin(static_cast<int>((x - bounds.getX()) * step), recordedSamples - 1);
+            auto sample = channelData[sampleIndex];
+            auto y = center - sample * scale;
+            waveformPath.lineTo(static_cast<float>(x), y);
+        }
+        
+        g.strokePath(waveformPath, juce::PathStrokeType(1.0f));
+    }
 }
 
 void MainComponent::resized()
 {
-    auto area = getLocalBounds().reduced(10).removeFromTop(150);
-    recordButton.setBounds(area.removeFromTop(30).reduced(5));
-    saveButton.setBounds(area.removeFromTop(30).reduced(5));
-    distortionButton.setBounds(area.removeFromTop(30).reduced(5));
-    delayButton.setBounds(area.removeFromTop(30).reduced(5));
+    auto area = getLocalBounds().reduced(10);
+    auto buttonArea = area.removeFromTop(150);
+    
+    recordButton.setBounds(buttonArea.removeFromTop(30).reduced(5));
+    saveButton.setBounds(buttonArea.removeFromTop(30).reduced(5));
+    distortionButton.setBounds(buttonArea.removeFromTop(30).reduced(5));
+    delayButton.setBounds(buttonArea.removeFromTop(30).reduced(5));
 }
 
 void MainComponent::buttonClicked(juce::Button* button)
@@ -105,41 +124,42 @@ void MainComponent::buttonClicked(juce::Button* button)
     if (button == &recordButton)
     {
         isRecording = !isRecording;
-
+        recordButton.setButtonText(isRecording ? "Stop" : "Record");
+        
         if (isRecording)
         {
             recordedSamples = 0;
             recordedBuffer.clear();
-            recordButton.setButtonText("Stop");
         }
-        else
-        {
-            recordButton.setButtonText("Record");
-        }
+        repaint();
     }
-    else if (button == &saveButton)
+    else if (button == &saveButton && recordedSamples > 0)
     {
-        juce::FileChooser chooser("Save WAV File", {}, "*.wav");
-        chooser.launchAsync(juce::FileBrowserComponent::saveMode, [this](const juce::FileChooser& fc)
+        auto chooser = std::make_unique<juce::FileChooser>("Save Audio File",
+                                                         juce::File(),
+                                                         "*.wav");
+
+        auto chooserFlags = juce::FileBrowserComponent::saveMode |
+                          juce::FileBrowserComponent::canSelectFiles |
+                          juce::FileBrowserComponent::warnAboutOverwriting;
+
+        chooser->launchAsync(chooserFlags, [this](const juce::FileChooser& fc)
         {
             auto file = fc.getResult();
-            if (file != juce::File{})
+            if (file != juce::File())
             {
                 juce::WavAudioFormat wavFormat;
-                std::unique_ptr<juce::FileOutputStream> outputStream(file.createOutputStream());
-
-                if (outputStream != nullptr)
+                if (auto outputStream = file.createOutputStream())
                 {
-                    std::unique_ptr<juce::AudioFormatWriter> writer(
-                        wavFormat.createWriterFor(outputStream.get(), 44100, 2, 16, {}, 0));
-
-                    if (writer != nullptr)
+                    if (auto writer = wavFormat.createWriterFor(outputStream.get(),
+                                                              deviceManager.getCurrentAudioDevice()->getCurrentSampleRate(),
+                                                              recordedBuffer.getNumChannels(),
+                                                              16, {}, 0))
                     {
+                        outputStream.release(); // writer now owns the stream
                         writer->writeFromAudioSampleBuffer(recordedBuffer, 0, recordedSamples);
-                        DBG("File saved: " + file.getFullPathName());
+                        writer->flush();
                     }
-
-                    outputStream.release(); // передано во writer
                 }
             }
         });
@@ -162,7 +182,9 @@ void MainComponent::applyEffects(juce::AudioBuffer<float>& buffer)
         {
             auto* data = buffer.getWritePointer(ch);
             for (int i = 0; i < buffer.getNumSamples(); ++i)
-                data[i] = std::tanh(data[i] * 5.0f); // простая перегрузка
+            {
+                data[i] = std::tanh(data[i] * 5.0f);
+            }
         }
     }
 

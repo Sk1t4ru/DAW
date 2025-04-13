@@ -1,15 +1,17 @@
 #include <JuceHeader.h>
 #include "MainComponent.h"
 
-class DAWApplication  : public juce::JUCEApplication
+class DAWApplication : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override       { return "Simple DAW"; }
-    const juce::String getApplicationVersion() override    { return "1.0.0"; }
+    DAWApplication() = default;
 
-    void initialise (const juce::String&) override
+    const juce::String getApplicationName() override { return "Simple DAW"; }
+    const juce::String getApplicationVersion() override { return "1.0.0"; }
+
+    void initialise(const juce::String&) override
     {
-        mainWindow.reset (new MainWindow ("Simple DAW", new MainComponent(), *this));
+        mainWindow.reset(new MainWindow(getApplicationName(), *this));
     }
 
     void shutdown() override
@@ -17,20 +19,21 @@ public:
         mainWindow = nullptr;
     }
 
+private:
     class MainWindow : public juce::DocumentWindow
     {
     public:
-        MainWindow (juce::String name, juce::Component* c, JUCEApplication& app)
-            : DocumentWindow (name,
-                              juce::Desktop::getInstance().getDefaultLookAndFeel()
-                                                        .findColour (ResizableWindow::backgroundColourId),
-                              DocumentWindow::allButtons),
-              owner (app)
+        MainWindow(const juce::String& name, JUCEApplication& app)
+            : DocumentWindow(name,
+                            juce::Desktop::getInstance().getDefaultLookAndFeel()
+                                                      .findColour(juce::ResizableWindow::backgroundColourId),
+                            DocumentWindow::allButtons),
+              owner(app)
         {
-            setUsingNativeTitleBar (true);
-            setContentOwned (c, true);
-            centreWithSize (getWidth(), getHeight());
-            setVisible (true);
+            setUsingNativeTitleBar(true);
+            setContentOwned(new MainComponent(), true);
+            centreWithSize(getWidth(), getHeight());
+            setVisible(true);
         }
 
         void closeButtonPressed() override
@@ -42,9 +45,7 @@ public:
         JUCEApplication& owner;
     };
 
-private:
     std::unique_ptr<MainWindow> mainWindow;
 };
 
-START_JUCE_APPLICATION (DAWApplication)
-//123
+START_JUCE_APPLICATION(DAWApplication)
