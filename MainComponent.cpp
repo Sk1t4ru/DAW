@@ -1,6 +1,8 @@
+// MainComponent.cpp
 #include "MainComponent.h"
 
-MainComponent::MainComponent()
+MainComponent::MainComponent() : 
+    thumbnail(512, formatManager, thumbnailCache)
 {
     addAndMakeVisible(recordButton);
     addAndMakeVisible(saveButton);
@@ -17,54 +19,120 @@ MainComponent::MainComponent()
     distortionButton.addListener(this);
     delayButton.addListener(this);
 
+    formatManager.registerBasicFormats();
+    thumbnail.addChangeListener(this);
+
     setSize(600, 400);
-    setAudioChannels(2, 2);
+    
+    // Запрашиваем разрешения на запись
+    juce::RuntimePermissions::request(juce::RuntimePermissions::recordAudio,
+                                     [this](bool granted)
+                                     {
+                                         int numInputChannels = granted ? 2 : 0;
+                                         setAudioChannels(numInputChannels, 2);
+                                     });
 }
 
 MainComponent::~MainComponent()
 {
+    thumbnail.removeChangeListener(this);
     shutdownAudio();
 }
 
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
-    recordedBuffer.setSize(2, static_cast<int>(sampleRate * 60.0));
+    recordedBuffer.setSize(2, static_cast<int>(sampleRate * 300.0)); // 5 минут записи
     recordedBuffer.clear();
     recordedSamples = 0;
 
-    delayBuffer.setSize(2, static_cast<int>(sampleRate));
+    delayBuffer.setSize(2, static_cast<int>(sampleRate * 2.0)); // 2 секунды задержки
     delayBuffer.clear();
     delayBufferPos = 0;
+
+    thumbnail.reset(2, sampleRate);
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
-    auto* buffer = bufferToFill.buffer;
-    
-    if (isRecording)
-    {
-        int remaining = recordedBuffer.getNumSamples() - recordedSamples;
-        int samplesToCopy = juce::jmin(bufferToFill.numSamples, remaining);
+    auto* outputBuffer = bufferToFill.buffer;
+    const int numSamples = bufferToFill.numSamples;
+    const int startSample = bufferToFill.startSample;
 
-        if (samplesToCopy > 0)
-        {
-            for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
-            {
-                recordedBuffer.copyFrom(ch, recordedSamples,
-                                     *buffer, ch, bufferToFill.startSample,
-                                     samplesToCopy);
-            }
-            recordedSamples += samplesToCopy;
-        }
-
-        if (samplesToCopy < bufferToFill.numSamples)
-        {
-            isRecording = false;
-            recordButton.setButtonText("Record");
-        }
+    // Получаем входные данные
+    auto* inputDevice = deviceManager.getCurrentAudioDevice();
+    if (!inputDevice) {
+        outputBuffer->clear();
+        return;
     }
 
-    applyEffects(*buffer);
+    const auto& inputChannels = inputDevice->getActiveInputChannels();
+    const int numInputChannels = inputChannels.countNumberOfSetBits();
+    // Применяем эффекты
+    applyEffects(*outputBuffer);
+    if (numInputChannels > 0)
+    {
+        // Создаем временный буфер для входных данных
+        juce::AudioBuffer<float> inputBuffer(numInputChannels, numSamples);
+        for (int ch = 0; ch < numInputChannels; ++ch)
+        {
+            if (inputChannels[ch])
+            {
+                inputBuffer.copyFrom(ch, 0, 
+                                   *outputBuffer, 
+                                   ch, 
+                                   startSample, 
+                                   numSamples);
+            }
+        }
+
+        // Запись в буфер
+        if (isRecording)
+        {
+            int remaining = recordedBuffer.getNumSamples() - recordedSamples;
+            int samplesToCopy = juce::jmin(numSamples, remaining);
+
+            if (samplesToCopy > 0)
+            {
+                for (int ch = 0; ch < recordedBuffer.getNumChannels(); ++ch)
+                {
+                    recordedBuffer.copyFrom(ch, recordedSamples,
+                                          inputBuffer,
+                                          ch % numInputChannels,
+                                          0,
+                                          samplesToCopy);
+                }
+                recordedSamples += samplesToCopy;
+                
+                // Обновляем thumbnail
+                thumbnail.addBlock(recordedSamples - samplesToCopy, 
+                                 inputBuffer, 
+                                 0, 
+                                 samplesToCopy);
+            }
+
+            if (samplesToCopy < numSamples)
+            {
+                isRecording = false;
+                recordButton.setButtonText("Record");
+            }
+        }
+
+        // Мониторинг - передаем входной сигнал на выход
+        for (int ch = 0; ch < outputBuffer->getNumChannels(); ++ch)
+        {
+            outputBuffer->copyFrom(ch, startSample,
+                                 inputBuffer,
+                                 ch % numInputChannels,
+                                 0,
+                                 numSamples);
+        }
+    }
+    else
+    {
+        outputBuffer->clear();
+    }
+
+    
 }
 
 void MainComponent::releaseResources()
@@ -75,36 +143,22 @@ void MainComponent::releaseResources()
 void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colours::darkslategrey);
-    drawWaveform(g);
-}
-
-void MainComponent::drawWaveform(juce::Graphics& g)
-{
+    
+    // Рисуем waveform
     g.setColour(juce::Colours::lightgrey);
     auto bounds = getLocalBounds().removeFromBottom(200).reduced(10);
     g.drawRect(bounds, 1);
-
-    if (recordedSamples > 0)
+    
+    if (thumbnail.getTotalLength() > 0.0)
     {
         g.setColour(juce::Colours::cyan);
-        
-        auto* channelData = recordedBuffer.getReadPointer(0);
-        auto scale = bounds.getHeight() / 2.0f;
-        auto center = bounds.getCentreY();
-        auto step = static_cast<float>(recordedSamples) / bounds.getWidth();
-        
-        juce::Path waveformPath;
-        waveformPath.startNewSubPath(bounds.getX(), center);
-        
-        for (int x = bounds.getX(); x < bounds.getRight(); ++x)
-        {
-            auto sampleIndex = juce::jmin(static_cast<int>((x - bounds.getX()) * step), recordedSamples - 1);
-            auto sample = channelData[sampleIndex];
-            auto y = center - sample * scale;
-            waveformPath.lineTo(static_cast<float>(x), y);
-        }
-        
-        g.strokePath(waveformPath, juce::PathStrokeType(1.0f));
+        thumbnail.drawChannels(g, bounds.reduced(2), 
+                             0.0, thumbnail.getTotalLength(), 1.0f);
+    }
+    else
+    {
+        g.setFont(14.0f);
+        g.drawFittedText("(No audio recorded)", bounds, juce::Justification::centred, 2);
     }
 }
 
@@ -123,40 +177,39 @@ void MainComponent::buttonClicked(juce::Button* button)
 {
     if (button == &recordButton)
     {
-        isRecording = !isRecording;
-        recordButton.setButtonText(isRecording ? "Stop" : "Record");
-        
         if (isRecording)
-        {
-            recordedSamples = 0;
-            recordedBuffer.clear();
-        }
-        repaint();
+            stopRecording();
+        else
+            startRecording();
     }
     else if (button == &saveButton && recordedSamples > 0)
     {
-        auto chooser = std::make_unique<juce::FileChooser>("Save Audio File",
-                                                         juce::File(),
-                                                         "*.wav");
-
         auto chooserFlags = juce::FileBrowserComponent::saveMode |
                           juce::FileBrowserComponent::canSelectFiles |
                           juce::FileBrowserComponent::warnAboutOverwriting;
 
-        chooser->launchAsync(chooserFlags, [this](const juce::FileChooser& fc)
+        fileChooser = std::make_unique<juce::FileChooser>("Save Audio File",
+            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+            "*.wav");
+
+        fileChooser->launchAsync(chooserFlags, [this](const juce::FileChooser& chooser)
         {
-            auto file = fc.getResult();
-            if (file != juce::File())
+            auto file = chooser.getResult();
+            if (file != juce::File{})
             {
                 juce::WavAudioFormat wavFormat;
-                if (auto outputStream = file.createOutputStream())
+                std::unique_ptr<juce::AudioFormatWriter> writer;
+                
+                if (auto outputStream = std::unique_ptr<juce::FileOutputStream>(file.createOutputStream()))
                 {
-                    if (auto writer = wavFormat.createWriterFor(outputStream.get(),
-                                                              deviceManager.getCurrentAudioDevice()->getCurrentSampleRate(),
-                                                              recordedBuffer.getNumChannels(),
-                                                              16, {}, 0))
+                    writer.reset(wavFormat.createWriterFor(outputStream.get(),
+                        deviceManager.getCurrentAudioDevice()->getCurrentSampleRate(),
+                        recordedBuffer.getNumChannels(),
+                        16, {}, 0));
+                    
+                    if (writer != nullptr)
                     {
-                        outputStream.release(); // writer now owns the stream
+                        outputStream.release(); // writer теперь владеет потоком
                         writer->writeFromAudioSampleBuffer(recordedBuffer, 0, recordedSamples);
                         writer->flush();
                     }
@@ -172,6 +225,40 @@ void MainComponent::buttonClicked(juce::Button* button)
     {
         useDelay = delayButton.getToggleState();
     }
+}
+
+void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
+{
+    if (source == &thumbnail)
+        repaint();
+}
+
+void MainComponent::startRecording()
+{
+    if (!juce::RuntimePermissions::isGranted(juce::RuntimePermissions::writeExternalStorage))
+    {
+        juce::RuntimePermissions::request(juce::RuntimePermissions::writeExternalStorage,
+                                         [this](bool granted) { if (granted) startRecording(); });
+        return;
+    }
+
+    lastRecording = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                      .getNonexistentChildFile("Recording", ".wav");
+
+    recordedSamples = 0;
+    recordedBuffer.clear();
+    thumbnail.reset(2, deviceManager.getCurrentAudioDevice()->getCurrentSampleRate());
+
+    isRecording = true;
+    recordButton.setButtonText("Stop");
+    repaint();
+}
+
+void MainComponent::stopRecording()
+{
+    isRecording = false;
+    recordButton.setButtonText("Record");
+    repaint();
 }
 
 void MainComponent::applyEffects(juce::AudioBuffer<float>& buffer)
@@ -200,8 +287,8 @@ void MainComponent::applyEffects(juce::AudioBuffer<float>& buffer)
             {
                 float dry = in[i];
                 float delayed = delayData[delayBufferPos];
-                out[i] = dry + 0.5f * delayed;
-                delayData[delayBufferPos] = dry + delayed * 0.5f;
+                out[i] = dry + 0.2f * delayed;
+                delayData[delayBufferPos] = dry + delayed * 0.2f;
                 delayBufferPos = (delayBufferPos + 1) % delayBuffer.getNumSamples();
             }
         }
